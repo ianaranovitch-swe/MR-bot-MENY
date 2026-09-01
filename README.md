@@ -27,7 +27,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 copy .env.example .env
 ```
 
@@ -66,36 +66,103 @@ pytest
 - `/start` и `/menu` — меню в личке
 - `/publicera_meny` — публикация меню в канал (только админ канала)
 
-## Деплой
+## Деплой на Railway
 
-Вариант для домашнего ПК / VPS: бот должен работать постоянно, иначе кнопки в канале откроют чат, но бот не ответит.
+Бот должен работать постоянно. Railway держит его включённым в облаке,
+даже когда твой компьютер выключен.
 
-1. Положи проект на сервер (или оставь ПК включённым).
-2. Создай `.venv`, установи зависимости, заполни `.env`.
-3. Запусти как службу Windows или через `nssm` / Task Scheduler «при входе в систему».
-4. Проверь личкой `/start`, затем `/publicera_meny`.
+Файл `.env` на Railway **не загружается**. Токен и канал задаются
+во вкладке **Variables**. Локальный `.env` в Git не попадает.
 
-На Linux-VPS можно использовать systemd-юнит `meny-bot.service` с `WorkingDirectory` на папку проекта и `ExecStart=.../.venv/bin/python telegram_meny_abmrab.py`.
+Перед заливкой останови локальный запуск (`Ctrl+C`). Два бота с одним
+токеном одновременно дают ошибку 409.
+
+### 1. Залей код на GitHub
+
+Репозиторий лучше сделать **private**.
+
+```powershell
+git add railway.toml .python-version .railwayignore requirements.txt requirements-dev.txt README.md
+git add -u
+git status
+```
+
+Убедись, что в списке **нет** `.env`. Затем закоммить и отправь:
+
+```powershell
+git commit -m "Prepare bot for Railway worker deploy."
+git push -u origin HEAD
+```
+
+### 2. Создай проект на Railway
+
+1. Открой [railway.com](https://railway.com) и войди (удобно через GitHub).
+2. **New Project** → **Deploy from GitHub repo**.
+3. Выбери репозиторий `MR-bot-MENY`.
+4. Если GitHub ещё не подключён — нажми **Configure GitHub App** и дай доступ к репо.
+
+Railway сам найдёт Python. Старт уже прописан в `railway.toml`:
+`python telegram_meny_abmrab.py`.
+
+### 3. Добавь переменные (это вместо `.env`)
+
+1. Открой сервис (карточка проекта).
+2. Вкладка **Variables**.
+3. **+ New Variable** и добавь две штуки:
+
+| Имя | Значение |
+|---|---|
+| `BOT_TOKEN` | тот же токен, что в твоём `.env` |
+| `CHANNEL` | `@abmrab` (или username твоего канала) |
+
+4. Нажми **Deploy** / дождись автоматического редеплоя после сохранения переменных.
+
+**Не нажимай Generate Domain.** Это не сайт, публичный адрес не нужен.
+
+### 4. Проверь, что бот живой
+
+1. Вкладка **Deployments** — статус **Success**.
+2. Вкладка **Logs** — строка вроде: `Бот запущен. Канал: @abmrab`.
+3. В Telegram напиши `@MRAB_SWE_bot` команду `/start`.
+
+Если в логах `ValueError` про токен — переменная `BOT_TOKEN` пустая или с пробелом.
+
+### 5. Права в канале — после того как бот уже крутится
+
+Это делается **в канале**, не в BotFather:
+
+1. Открой канал → название сверху → **Manage**.
+2. **Administrators** → **Add Administrator**.
+3. Найди `@MRAB_SWE_bot`.
+4. Включи Post Messages, Edit Messages, Pin Messages.
+5. В личке бота напиши `/publicera_meny`.
 
 ## Откат
 
-1. Останови процесс бота (`Ctrl+C` или остановка службы).
-2. Верни предыдущую версию файла `telegram_meny_abmrab.py` (`git checkout -- telegram_meny_abmrab.py` или копия).
-3. Если менял `.env` — верни старый токен и канал.
-4. Запусти бота снова и проверь `/start`.
+**Railway**
 
-Если опубликовал плохое меню: удали или открепи пост в канале вручную и снова вызови `/publicera_meny`.
+1. Открой сервис → **Deployments**.
+2. Найди прошлый успешный деплой → **Rollback** / Redeploy.
+3. Если сломались переменные — верни старые `BOT_TOKEN` и `CHANNEL` и задеплой снова.
+
+**Локально**
+
+1. Останови процесс (`Ctrl+C`).
+2. Верни предыдущий `telegram_meny_abmrab.py`.
+3. Запусти снова и проверь `/start`.
+
+Плохой пост в канале удали вручную и снова вызови `/publicera_meny`.
 
 ## Диагностика
 
 | Симптом | Что проверить |
 |---|---|
-| `ValueError` про `BOT_TOKEN` | Файл `.env` лежит рядом со скриптом и токен не пустой |
-| Бот молчит | Окно с `python telegram_meny_abmrab.py` должно быть запущено |
+| `ValueError` про `BOT_TOKEN` | Локально: файл `.env`. На Railway: Variables → `BOT_TOKEN` |
+| Бот молчит | Локально окно запущено. На Railway деплой Success и есть логи |
 | «Bara en administratör...» | Команду пишет не админ канала |
 | Меню не публикуется | Бот добавлен админом канала и может постить |
 | Меню опубликовано, но не закреплено | Включи боту право Pin Messages |
 | Кнопка в канале открывает бота, но пусто | Бот не запущен или токен от другого бота |
-| Конфликт `getUpdates` / 409 | Второй экземпляр бота с тем же токеном уже запущен |
+| Конфликт `getUpdates` / 409 | Второй экземпляр с тем же токеном (локально + Railway) |
 
 Логи смотри в том же окне терминала: ошибки публикации пишутся с текстом исключения.

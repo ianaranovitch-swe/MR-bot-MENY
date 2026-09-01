@@ -1,0 +1,10 @@
+# Railway читает этот файл и знает, как запускать бота.
+# Это не сайт: HTTP-порт и публичный домен не нужны.
+
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "python telegram_meny_abmrab.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
