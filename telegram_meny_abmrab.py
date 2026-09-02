@@ -65,6 +65,11 @@ MENU_ITEMS: tuple[tuple[str, str, str], ...] = (
         "✨ Kvantresonans",
         "<b>Kvantresonans</b>\n\nHär hittar du information, nyheter och material om Kvantresonans.",
     ),
+    (
+        "rejuvination_club_100",
+        "🌿 Rejuvination Club 100+",
+        "<b>Rejuvination Club 100+</b>\n\nHär hittar du information, nyheter och material om Rejuvination Club 100+.",
+    ),
 )
 
 CONTENT = {key: text for key, _label, text in MENU_ITEMS}
