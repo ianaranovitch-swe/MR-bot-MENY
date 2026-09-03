@@ -1,7 +1,7 @@
 # Меню-бот для Telegram-канала
 
 Бот показывает меню тем (Nyheter, Aquatone, Biotrem, Monicor, Kvantresonans,
-Rejuvination Club 100+). В канале кнопки открывают личный чат с ботом.
+Longevity Club 100+). В канале кнопки открывают личный чат с ботом.
 Каждая тема в личке показывается с картинкой-баннером, если файл лежит в `banners/`.
 
 ## Что нужно заранее
@@ -52,7 +52,7 @@ python telegram_meny_abmrab.py
 | Biotrem | `biotrem.png` |
 | Monicor | `monicor.png` |
 | Kvantresonans | `kvantresonans.png` |
-| Rejuvination Club 100+ | `rejuvination_club_100.png` |
+| Longevity Club 100+ | `longevity_club_100.png` |
 
 Если файла нет, бот покажет только текст — не упадёт.
 

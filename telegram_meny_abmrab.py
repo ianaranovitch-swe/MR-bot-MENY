@@ -73,10 +73,10 @@ MENU_ITEMS: tuple[tuple[str, str, str, str], ...] = (
         "kvantresonans.png",
     ),
     (
-        "rejuvination_club_100",
-        "🌿 Rejuvination Club 100+",
-        "<b>Rejuvination Club 100+</b>\n\nHär hittar du information, nyheter och material om Rejuvination Club 100+.",
-        "rejuvination_club_100.png",
+        "longevity_club_100",
+        "🌿 Longevity Club 100+",
+        "<b>Longevity Club 100+</b>\n\nHär hittar du information, nyheter och material om Longevity Club 100+.",
+        "longevity_club_100.png",
     ),
 )
 

@@ -28,7 +28,7 @@ EXPECTED_BANNERS = {
     "biotrem": "biotrem.png",
     "monicor": "monicor.png",
     "kvantresonans": "kvantresonans.png",
-    "rejuvination_club_100": "rejuvination_club_100.png",
+    "longevity_club_100": "longevity_club_100.png",
 }
 
 
