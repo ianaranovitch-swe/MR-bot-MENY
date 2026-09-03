@@ -19,7 +19,9 @@ from telegram_meny_abmrab import (  # noqa: E402
     build_application,
     channel_menu,
     load_token,
-    main_menu,
+    menu_card_caption,
+    topic_card_markup,
+    topic_title,
 )
 
 EXPECTED_BANNERS = {
@@ -50,12 +52,19 @@ def test_captions_fit_telegram_limit() -> None:
         assert len(text) <= MessageLimit.CAPTION_LENGTH
 
 
-def test_main_menu_has_one_button_per_topic() -> None:
-    markup = main_menu()
-    buttons = [button for row in markup.inline_keyboard for button in row]
-    assert [button.callback_data for button in buttons] == [
-        key for key, _label, _text, _banner in MENU_ITEMS
-    ]
+def test_topic_titles_and_card_captions() -> None:
+    assert topic_title("📰 Nyheter") == "Nyheter"
+    assert topic_title("🌿 Longevity Club 100+") == "Longevity Club 100+"
+    assert menu_card_caption("💧 Aquatone") == "<b>Aquatone</b>"
+
+
+def test_topic_card_has_matching_button() -> None:
+    for key, label, _text, _banner in MENU_ITEMS:
+        markup = topic_card_markup(key, label)
+        buttons = [button for row in markup.inline_keyboard for button in row]
+        assert len(buttons) == 1
+        assert buttons[0].callback_data == key
+        assert buttons[0].text == label
 
 
 def test_channel_menu_uses_deep_links() -> None:

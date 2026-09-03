@@ -1,19 +1,20 @@
 """Меню-бот для Telegram-канала.
 
 Как это работает простыми словами:
-пользователь нажимает кнопку в канале → открывается личный чат с ботом
-→ бот показывает картинку-баннер и текст темы.
+на первом экране бот показывает шесть карточек подряд —
+картинка и крупное название. По нажатию открывается текст темы.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import ChatMemberStatus, MessageLimit, ParseMode
+from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -40,7 +41,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 CHANNEL = os.getenv("CHANNEL", "@abmrab").strip()
 
 # Один список тем: ключ, кнопка, текст, имя файла-баннера.
-# Новую тему добавляешь только сюда — кнопки и картинка подхватятся сами.
+# Новую тему добавляешь только сюда — карточки меню подхватятся сами.
 MENU_ITEMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "nyheter",
@@ -82,10 +83,10 @@ MENU_ITEMS: tuple[tuple[str, str, str, str], ...] = (
 
 CONTENT = {key: text for key, _label, text, _banner in MENU_ITEMS}
 BANNER_FILES = {key: banner for key, _label, _text, banner in MENU_ITEMS}
-MENU_WELCOME = "<b>Välkommen!</b>\n\nVälj ett ämne:"
 CHANNEL_MENU_TEXT = "<b>MENY</b>\n\nVälj ett ämne nedan:"
 ADMIN_STATUSES = {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
 _BANNER_FILE_IDS_KEY = "banner_file_ids"
+_MENU_MESSAGE_IDS_KEY = "menu_message_ids"
 
 
 def load_token() -> str:
@@ -133,14 +134,20 @@ def log_banner_status() -> None:
         logger.warning("Баннеры отсутствуют, будет только текст: %s", ", ".join(missing))
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    """Кнопки внутри личного чата с ботом."""
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(label, callback_data=key)]
-            for key, label, _text, _banner in MENU_ITEMS
-        ]
-    )
+def topic_title(label: str) -> str:
+    """Из «📰 Nyheter» берём крупное имя темы: Nyheter."""
+    parts = label.split(" ", 1)
+    return parts[1] if len(parts) > 1 else label
+
+
+def menu_card_caption(label: str) -> str:
+    """Крупный заголовок под картинкой на первом экране."""
+    return f"<b>{html.escape(topic_title(label))}</b>"
+
+
+def topic_card_markup(key: str, label: str) -> InlineKeyboardMarkup:
+    """Одна кнопка на карточке меню — это пункт меню."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=key)]])
 
 
 def channel_menu(bot_username: str) -> InlineKeyboardMarkup:
@@ -180,49 +187,97 @@ def _remember_file_id(
     cache[key] = message.photo[-1].file_id
 
 
+async def _try_delete_message(message: Message) -> None:
+    try:
+        await message.delete()
+    except (BadRequest, Forbidden, TelegramError) as error:
+        logger.info("Не удалось удалить старое сообщение: %s", error)
+
+
+async def _delete_menu_messages(
+    bot: Bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Убираем старые карточки, чтобы меню не копилось в чате."""
+    raw_ids = context.user_data.get(_MENU_MESSAGE_IDS_KEY, [])
+    message_ids = [item for item in raw_ids if isinstance(item, int)]
+    for message_id in message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except (BadRequest, Forbidden, TelegramError) as error:
+            logger.info("Не удалось удалить карточку меню %s: %s", message_id, error)
+    context.user_data[_MENU_MESSAGE_IDS_KEY] = []
+
+
+async def _send_menu_card(
+    *,
+    bot: Bot,
+    chat_id: int,
+    key: str,
+    label: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Одна карточка: баннер + крупное название + кнопка пункта меню."""
+    caption = menu_card_caption(label)
+    markup = topic_card_markup(key, label)
+    photo = _cached_file_id(context, key) or banner_path(key)
+
+    if photo is not None:
+        try:
+            sent = await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_notification=True,
+            )
+            _remember_file_id(context, key, sent)
+            return sent.message_id
+        except TelegramError:
+            logger.exception("Не удалось отправить баннер меню %s, шлём текст", key)
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+        disable_notification=True,
+    )
+    return sent.message_id
+
+
+async def _send_menu_gallery(
+    *,
+    bot: Bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Первый экран: шесть картинок подряд, как витрина."""
+    await _delete_menu_messages(bot, chat_id, context)
+    sent_ids: list[int] = []
+    for key, label, _text, _banner in MENU_ITEMS:
+        sent_ids.append(
+            await _send_menu_card(
+                bot=bot,
+                chat_id=chat_id,
+                key=key,
+                label=label,
+                context=context,
+            )
+        )
+    context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
+
+
 async def _send_topic(
     *,
     bot: Bot,
     chat_id: int,
     topic: str,
-    context: ContextTypes.DEFAULT_TYPE,
     reply_to: Message | None = None,
 ) -> None:
-    """Показываем тему: картинка + подпись, а если файла нет — обычный текст."""
+    """После нажатия пункта — только текст темы, без повторного баннера."""
     text = CONTENT[topic]
     markup = back_button()
-    photo = _cached_file_id(context, topic) or banner_path(topic)
-    caption = text if len(text) <= MessageLimit.CAPTION_LENGTH else None
-
-    if photo is not None:
-        try:
-            if reply_to is not None:
-                sent = await reply_to.reply_photo(
-                    photo=photo,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
-            else:
-                sent = await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
-            _remember_file_id(context, topic, sent)
-            if caption is None:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
-            return
-        except TelegramError:
-            logger.exception("Не удалось отправить баннер темы %s, шлём текст", topic)
-
     if reply_to is not None:
         await reply_to.reply_text(
             text, parse_mode=ParseMode.HTML, reply_markup=markup
@@ -236,32 +291,8 @@ async def _send_topic(
     )
 
 
-async def _send_welcome(*, bot: Bot, chat_id: int, reply_to: Message | None = None) -> None:
-    if reply_to is not None:
-        await reply_to.reply_text(
-            MENU_WELCOME,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu(),
-        )
-        return
-    await bot.send_message(
-        chat_id=chat_id,
-        text=MENU_WELCOME,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu(),
-    )
-
-
-async def _try_delete_message(message: Message) -> None:
-    """Старое сообщение удаляем, чтобы не мешать фото и тексту в одном чате."""
-    try:
-        await message.delete()
-    except (BadRequest, Forbidden, TelegramError) as error:
-        logger.info("Не удалось удалить старое сообщение: %s", error)
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start и /menu. Если пришли по кнопке из канала — сразу нужная тема."""
+    """/start и /menu. Без аргументов — витрина из баннеров."""
     if update.message is None:
         return
 
@@ -271,7 +302,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             bot=context.bot,
             chat_id=update.message.chat_id,
             topic=topic,
-            context=context,
             reply_to=update.message,
         )
         return
@@ -279,10 +309,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if topic:
         logger.info("Неизвестная тема в deep-link: %s", topic)
 
-    await _send_welcome(
+    await _send_menu_gallery(
         bot=context.bot,
         chat_id=update.message.chat_id,
-        reply_to=update.message,
+        context=context,
     )
 
 
@@ -356,25 +386,28 @@ async def _try_pin_menu(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> 
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопка в личке: удаляем старое сообщение и шлём новое (текст или фото)."""
+    """Кнопка на карточке открывает текст. Назад снова рисует витрину."""
     query = update.callback_query
     if query is None or query.data is None or query.message is None:
         return
 
     await query.answer()
     chat_id = query.message.chat_id
-    await _try_delete_message(query.message)
 
     if query.data == "menu":
-        await _send_welcome(bot=context.bot, chat_id=chat_id)
+        await _try_delete_message(query.message)
+        await _send_menu_gallery(
+            bot=context.bot, chat_id=chat_id, context=context
+        )
         return
 
     if query.data in CONTENT:
+        await _delete_menu_messages(context.bot, chat_id, context)
+        await _try_delete_message(query.message)
         await _send_topic(
             bot=context.bot,
             chat_id=chat_id,
             topic=query.data,
-            context=context,
         )
 
 
