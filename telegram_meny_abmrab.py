@@ -103,6 +103,7 @@ _MENU_MESSAGE_IDS_KEY = "menu_message_ids"
 _CONTENT_CACHE_KEY = "content_cache"
 _PHOTOS_CACHE_KEY = "photos_cache"
 _LINKS_CACHE_KEY = "links_cache"
+_STEP_PROMPT_ID_KEY = "step_prompt_id"
 _ADMIN_LINK_CALLBACKS = {
     "cancel_edit",
     "done_photos",
@@ -594,6 +595,55 @@ async def _show_redigera_menu_on_query(query) -> None:
     )
 
 
+async def _forget_step_prompt(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[_STEP_PROMPT_ID_KEY] = None
+
+
+async def _delete_step_prompt(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    """Убираем старые Klar-кнопки, чтобы не искать их вверх по чату."""
+    old_id = context.user_data.get(_STEP_PROMPT_ID_KEY)
+    if isinstance(old_id, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_id)
+        except (BadRequest, Forbidden, TelegramError):
+            pass
+    await _forget_step_prompt(context)
+
+
+async def _send_step_prompt(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup,
+) -> None:
+    """Новое сообщение с Klar/Hoppa över всегда внизу чата."""
+    await _delete_step_prompt(context, chat_id)
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=markup,
+    )
+    context.user_data[_STEP_PROMPT_ID_KEY] = sent.message_id
+
+
+async def _show_topic_preview(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, key: str
+) -> None:
+    """Показать админу результат сразу. Перезапуск бота не нужен — кэш уже обновлён."""
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Så här ser rubriken ut nu:",
+    )
+    await _send_topic(
+        bot=context.bot,
+        chat_id=chat_id,
+        topic=key,
+        context=context,
+    )
+
+
 async def _start_photo_step(
     context: ContextTypes.DEFAULT_TYPE, key: str, message: Message
 ) -> None:
@@ -602,10 +652,12 @@ async def _start_photo_step(
     context.user_data["photo_buffer"] = []
     context.user_data["awaiting_links"] = None
     context.user_data["link_buffer"] = []
-    await message.reply_text(
+    await _send_step_prompt(
+        context,
+        message.chat_id,
         "✅ Texten är sparad. Skicka nu ett eller flera foton att bifoga "
         "innehållet — ett i taget. Tryck ✅ Klar när du är färdig.",
-        reply_markup=photo_step_markup(),
+        photo_step_markup(),
     )
 
 
@@ -620,8 +672,11 @@ async def handle_admin_text(
         await _collect_admin_link(update, context)
         return
     if context.user_data.get("awaiting_photos"):
-        await update.message.reply_text(
-            "Skicka ett foto eller tryck ✅ Klar / ⏭️ Hoppa över."
+        await _send_step_prompt(
+            context,
+            update.message.chat_id,
+            "Skicka ett foto eller tryck ✅ Klar / ⏭️ Hoppa över.",
+            photo_step_markup(),
         )
         return
     key = context.user_data.get("awaiting_edit")
@@ -661,8 +716,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         buffer = []
         context.user_data["photo_buffer"] = buffer
     buffer.append(update.message.photo[-1].file_id)
-    await update.message.reply_text(
-        f"📷 Foto mottaget ({len(buffer)} st hittills). Skicka fler eller tryck ✅ Klar."
+    await _send_step_prompt(
+        context,
+        update.message.chat_id,
+        f"📷 Foto mottaget ({len(buffer)} st hittills). "
+        "Skicka fler eller tryck ✅ Klar / ⏭️ Hoppa över.",
+        photo_step_markup(),
     )
 
 
@@ -682,10 +741,12 @@ async def _start_link_step(
     _clear_photo_state(context)
     context.user_data["awaiting_links"] = key
     context.user_data["link_buffer"] = []
-    await message.reply_text(
+    await _send_step_prompt(
+        context,
+        message.chat_id,
         "🔗 Vill du lägga till länkar (t.ex. till YouTube)? "
         "Skicka en länk i taget. Tryck ✅ Klar när du är färdig.",
-        reply_markup=link_step_markup(),
+        link_step_markup(),
     )
 
 
@@ -697,8 +758,11 @@ async def _collect_admin_link(
     raw = (update.message.text or "").strip()
     url = normalize_url(raw)
     if url is None:
-        await update.message.reply_text(
-            "Det där ser inte ut som en länk. Försök igen eller tryck ✅ Klar."
+        await _send_step_prompt(
+            context,
+            update.message.chat_id,
+            "Det där ser inte ut som en länk. Försök igen eller tryck ✅ Klar.",
+            link_step_markup(),
         )
         return
     buffer = context.user_data.setdefault("link_buffer", [])
@@ -706,8 +770,12 @@ async def _collect_admin_link(
         buffer = []
         context.user_data["link_buffer"] = buffer
     buffer.append((url, link_button_label(url)))
-    await update.message.reply_text(
-        f"🔗 Länk mottagen ({len(buffer)} st hittills)."
+    await _send_step_prompt(
+        context,
+        update.message.chat_id,
+        f"🔗 Länk mottagen ({len(buffer)} st hittills). "
+        "Skicka fler eller tryck ✅ Klar / ⏭️ Hoppa över.",
+        link_step_markup(),
     )
 
 
@@ -719,11 +787,13 @@ async def _handle_done_photos(
     file_ids = [item for item in buffer if isinstance(item, str)]
     if not isinstance(key, str) or key not in TOPIC_KEYS:
         _clear_photo_state(context)
+        await _forget_step_prompt(context)
         await query.edit_message_text("Redigeringen är avbruten.")
         return
 
     title = topic_display_name(key)
     if not file_ids:
+        await _forget_step_prompt(context)
         await query.edit_message_text(
             "Inga foton sparades — innehållet är oförändrat vad gäller bilder."
         )
@@ -737,12 +807,14 @@ async def _handle_done_photos(
 
     await db.replace_photos(pool, key, file_ids, user_id)
     _update_photos_cache(context, key, file_ids)
+    await _forget_step_prompt(context)
     await query.edit_message_text(f"✅ {len(file_ids)} foto sparade för {title}.")
     await _start_link_step(context, key, query.message)
 
 
 async def _handle_skip_photos(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = context.user_data.get("awaiting_photos")
+    await _forget_step_prompt(context)
     await query.edit_message_text(
         "Innehållet är sparat utan ändringar av foton."
     )
@@ -765,15 +837,19 @@ async def _handle_done_links(
     ]
     if not isinstance(key, str) or key not in TOPIC_KEYS:
         _clear_link_state(context)
+        await _forget_step_prompt(context)
         await query.edit_message_text("Redigeringen är avbruten.")
         return
 
     title = topic_display_name(key)
+    chat_id = query.message.chat_id
     if not items:
         _clear_link_state(context)
+        await _forget_step_prompt(context)
         await query.edit_message_text(
             f"Inga länkar lades till. ✅ Rubriken {title} är helt uppdaterad."
         )
+        await _show_topic_preview(context, chat_id, key)
         return
 
     pool = _db_pool(context)
@@ -784,20 +860,25 @@ async def _handle_done_links(
     await db.append_links(pool, key, items, user_id)
     _append_links_cache(context, key, items)
     _clear_link_state(context)
+    await _forget_step_prompt(context)
     await query.edit_message_text(
         f"✅ {len(items)} nya länkar tillagda för {title}. "
         f"Rubriken är helt uppdaterad."
     )
+    await _show_topic_preview(context, chat_id, key)
 
 
 async def _handle_skip_links(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = context.user_data.get("awaiting_links")
     title = topic_display_name(key) if isinstance(key, str) else ""
+    chat_id = query.message.chat_id
     _clear_link_state(context)
-    if title:
+    await _forget_step_prompt(context)
+    if title and isinstance(key, str) and key in TOPIC_KEYS:
         await query.edit_message_text(
             f"Inga länkar lades till. ✅ Rubriken {title} är helt uppdaterad."
         )
+        await _show_topic_preview(context, chat_id, key)
         return
     await query.edit_message_text("Redigeringen är avslutad.")
 
@@ -823,6 +904,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data["awaiting_edit"] = key
             _clear_photo_state(context)
             _clear_link_state(context)
+            await _forget_step_prompt(context)
             title = topic_display_name(key)
             await query.edit_message_text(
                 f"✏️ Skicka den nya texten för {title}. "
@@ -834,6 +916,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data["awaiting_edit"] = None
             _clear_photo_state(context)
             _clear_link_state(context)
+            await _forget_step_prompt(context)
             await _show_redigera_menu_on_query(query)
             return
         if data == "done_photos":
