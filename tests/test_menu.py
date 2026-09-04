@@ -29,6 +29,7 @@ from telegram_meny_abmrab import (  # noqa: E402
     menu_card_caption,
     parse_admin_ids,
     redigera_menu,
+    remaining_menu_items,
     topic_card_markup,
     topic_keyboard,
     topic_title,
@@ -73,6 +74,16 @@ def test_topic_titles_and_card_captions() -> None:
     assert topic_title("🌿 Longevity Club 100+") == "Longevity Club 100+"
     assert menu_card_caption("💧 Aquatone") == "<b>Aquatone</b>"
     assert menu_card_caption("📰 Nyheter", is_new=True) == "<b>🆕 Nyheter</b>"
+
+
+def test_remaining_menu_items_skips_opened_topic() -> None:
+    rest = remaining_menu_items("nyheter")
+    keys = [key for key, _label, _text, _banner in rest]
+    assert "nyheter" not in keys
+    assert keys == [
+        key for key, _label, _text, _banner in MENU_ITEMS if key != "nyheter"
+    ]
+    assert len(rest) == len(MENU_ITEMS) - 1
 
 
 def test_topic_card_has_matching_button() -> None:

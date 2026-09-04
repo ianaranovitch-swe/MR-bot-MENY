@@ -205,6 +205,11 @@ def topic_display_name(key: str) -> str:
     return topic_title(TOPIC_LABELS.get(key, key))
 
 
+def remaining_menu_items(selected_key: str) -> tuple[tuple[str, str, str, str], ...]:
+    """Остальные рубрики меню — без той, которую уже открыли."""
+    return tuple(item for item in MENU_ITEMS if item[0] != selected_key)
+
+
 def _as_utc(moment: datetime) -> datetime:
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
@@ -390,13 +395,6 @@ def _remember_file_id(
     cache[key] = message.photo[-1].file_id
 
 
-async def _try_delete_message(message: Message) -> None:
-    try:
-        await message.delete()
-    except (BadRequest, Forbidden, TelegramError) as error:
-        logger.info("Не удалось удалить старое сообщение: %s", error)
-
-
 async def _delete_menu_messages(
     bot: Bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -453,10 +451,14 @@ async def _send_menu_gallery(
     bot: Bot,
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _delete_menu_messages(bot, chat_id, context)
+    exclude_key: str | None = None,
+    replace_view: bool = True,
+) -> list[int]:
+    if replace_view:
+        await _delete_menu_messages(bot, chat_id, context)
     sent_ids: list[int] = []
-    for key, label, _text, _banner in MENU_ITEMS:
+    items = remaining_menu_items(exclude_key) if exclude_key else MENU_ITEMS
+    for key, label, _text, _banner in items:
         sent_ids.append(
             await _send_menu_card(
                 bot=bot,
@@ -466,30 +468,71 @@ async def _send_menu_gallery(
                 context=context,
             )
         )
-    context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
+    if replace_view:
+        context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
+    return sent_ids
+
+
+async def _send_topic_banner(
+    *,
+    bot: Bot,
+    chat_id: int,
+    key: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Баннер открытой рубрики: картинка сверху, без кнопки (её уже нажали)."""
+    label = TOPIC_LABELS.get(key, key)
+    caption = menu_card_caption(label, is_topic_new(context, key))
+    photo = _cached_file_id(context, key) or banner_path(key)
+
+    if photo is not None:
+        try:
+            sent = await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                disable_notification=True,
+            )
+            _remember_file_id(context, key, sent)
+            return sent.message_id
+        except TelegramError:
+            logger.exception("Не удалось отправить баннер рубрики %s, шлём текст", key)
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode=ParseMode.HTML,
+        disable_notification=True,
+    )
+    return sent.message_id
 
 
 async def _send_topic_photos(
     bot: Bot, chat_id: int, topic: str, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+) -> list[int]:
     """Доп.фото рубрики — не баннеры. Одно фото отдельно, много — пачками по 10."""
     file_ids = topic_photo_ids(context, topic)
     if not file_ids:
-        return
+        return []
+    sent_ids: list[int] = []
     try:
         if len(file_ids) == 1:
-            await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
-            return
+            sent = await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+            return [sent.message_id]
         for chunk in db.chunk_ids(file_ids, 10):
             if len(chunk) == 1:
-                await bot.send_photo(chat_id=chat_id, photo=chunk[0])
+                sent = await bot.send_photo(chat_id=chat_id, photo=chunk[0])
+                sent_ids.append(sent.message_id)
             else:
-                await bot.send_media_group(
+                messages = await bot.send_media_group(
                     chat_id=chat_id,
                     media=[InputMediaPhoto(file_id) for file_id in chunk],
                 )
+                sent_ids.extend(message.message_id for message in messages)
     except TelegramError:
         logger.exception("Не удалось отправить фото рубрики %s", topic)
+    return sent_ids
 
 
 async def _send_topic(
@@ -498,22 +541,44 @@ async def _send_topic(
     chat_id: int,
     topic: str,
     context: ContextTypes.DEFAULT_TYPE,
-    reply_to: Message | None = None,
+    include_remaining_menu: bool = True,
+    track_view: bool = True,
 ) -> None:
-    text = topic_text(context, topic)
-    markup = topic_keyboard(context, topic)
-    if reply_to is not None:
-        await reply_to.reply_text(
-            text, parse_mode=ParseMode.HTML, reply_markup=markup
-        )
-    else:
-        await bot.send_message(
+    """Сначала баннер темы, потом её текст и фото, потом остальные карточки меню."""
+    if track_view:
+        await _delete_menu_messages(bot, chat_id, context)
+
+    sent_ids: list[int] = []
+    sent_ids.append(
+        await _send_topic_banner(
+            bot=bot,
             chat_id=chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
+            key=topic,
+            context=context,
         )
-    await _send_topic_photos(bot, chat_id, topic, context)
+    )
+    text = await bot.send_message(
+        chat_id=chat_id,
+        text=topic_text(context, topic),
+        parse_mode=ParseMode.HTML,
+        reply_markup=topic_keyboard(context, topic),
+    )
+    sent_ids.append(text.message_id)
+    sent_ids.extend(await _send_topic_photos(bot, chat_id, topic, context))
+
+    if include_remaining_menu:
+        sent_ids.extend(
+            await _send_menu_gallery(
+                bot=bot,
+                chat_id=chat_id,
+                context=context,
+                exclude_key=topic,
+                replace_view=False,
+            )
+        )
+
+    if track_view:
+        context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -527,7 +592,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=update.message.chat_id,
             topic=topic,
             context=context,
-            reply_to=update.message,
         )
         return
 
@@ -674,6 +738,8 @@ async def _show_topic_preview(
         chat_id=chat_id,
         topic=key,
         context=context,
+        include_remaining_menu=False,
+        track_view=False,
     )
 
 
@@ -970,15 +1036,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if data == "menu":
-        await _try_delete_message(query.message)
         await _send_menu_gallery(
             bot=context.bot, chat_id=chat_id, context=context
         )
         return
 
     if data in TOPIC_KEYS:
-        await _delete_menu_messages(context.bot, chat_id, context)
-        await _try_delete_message(query.message)
         await _send_topic(
             bot=context.bot,
             chat_id=chat_id,
