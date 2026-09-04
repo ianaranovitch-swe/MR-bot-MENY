@@ -70,7 +70,10 @@ async def seed_content_if_empty(
         return
     for key, text in defaults.items():
         await pool.execute(
-            "INSERT INTO content (key, text) VALUES ($1, $2)",
+            """
+            INSERT INTO content (key, text, updated_at)
+            VALUES ($1, $2, TIMESTAMPTZ '1970-01-01+00')
+            """,
             key,
             text,
         )
@@ -187,6 +190,30 @@ async def append_links(
                     start + offset,
                     added_by,
                 )
+
+
+async def fetch_last_activity(pool: asyncpg.Pool) -> dict[str, object]:
+    """Когда рубрику трогали в последний раз: текст, фото или ссылка."""
+    """Когда рубрику трогали в последний раз: текст, фото или ссылка."""
+    rows = await pool.fetch(
+        """
+        SELECT
+            c.key,
+            GREATEST(
+                COALESCE(c.updated_at, TIMESTAMPTZ '1970-01-01+00'),
+                COALESCE(
+                    (SELECT MAX(p.added_at) FROM content_photos p WHERE p.key = c.key),
+                    TIMESTAMPTZ '1970-01-01+00'
+                ),
+                COALESCE(
+                    (SELECT MAX(l.added_at) FROM content_links l WHERE l.key = c.key),
+                    TIMESTAMPTZ '1970-01-01+00'
+                )
+            ) AS last_at
+        FROM content c
+        """
+    )
+    return {str(row["key"]): row["last_at"] for row in rows}
 
 
 def chunk_ids(items: list[str], size: int = 10) -> list[list[str]]:

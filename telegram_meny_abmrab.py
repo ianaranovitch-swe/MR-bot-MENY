@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -103,7 +104,9 @@ _MENU_MESSAGE_IDS_KEY = "menu_message_ids"
 _CONTENT_CACHE_KEY = "content_cache"
 _PHOTOS_CACHE_KEY = "photos_cache"
 _LINKS_CACHE_KEY = "links_cache"
+_FRESHNESS_CACHE_KEY = "freshness_cache"
 _STEP_PROMPT_ID_KEY = "step_prompt_id"
+NEW_MARK_TTL = timedelta(days=2)
 _ADMIN_LINK_CALLBACKS = {
     "cancel_edit",
     "done_photos",
@@ -202,12 +205,41 @@ def topic_display_name(key: str) -> str:
     return topic_title(TOPIC_LABELS.get(key, key))
 
 
-def menu_card_caption(label: str) -> str:
-    return f"<b>{html.escape(topic_title(label))}</b>"
+def _as_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
-def topic_card_markup(key: str, label: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=key)]])
+def is_topic_new(context: ContextTypes.DEFAULT_TYPE, key: str) -> bool:
+    """🆕 два дня после правки текста, фото или ссылок."""
+    cache = context.application.bot_data.get(_FRESHNESS_CACHE_KEY, {})
+    if not isinstance(cache, dict):
+        return False
+    last = cache.get(key)
+    if not isinstance(last, datetime):
+        return False
+    return datetime.now(timezone.utc) - _as_utc(last) <= NEW_MARK_TTL
+
+
+def _touch_freshness(context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    cache = context.application.bot_data.setdefault(_FRESHNESS_CACHE_KEY, {})
+    if isinstance(cache, dict):
+        cache[key] = datetime.now(timezone.utc)
+
+
+def menu_card_caption(label: str, is_new: bool = False) -> str:
+    title = topic_title(label)
+    if is_new:
+        return f"<b>🆕 {html.escape(title)}</b>"
+    return f"<b>{html.escape(title)}</b>"
+
+
+def topic_card_markup(
+    key: str, label: str, is_new: bool = False
+) -> InlineKeyboardMarkup:
+    text = f"🆕 {label}" if is_new else label
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=key)]])
 
 
 def redigera_menu() -> InlineKeyboardMarkup:
@@ -386,8 +418,9 @@ async def _send_menu_card(
     label: str,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    caption = menu_card_caption(label)
-    markup = topic_card_markup(key, label)
+    is_new = is_topic_new(context, key)
+    caption = menu_card_caption(label, is_new)
+    markup = topic_card_markup(key, label, is_new)
     photo = _cached_file_id(context, key) or banner_path(key)
 
     if photo is not None:
@@ -696,6 +729,7 @@ async def handle_admin_text(
     title = topic_display_name(key)
     await db.upsert_content(pool, key, new_text, update.effective_user.id)
     _update_content_cache(context, key, new_text)
+    _touch_freshness(context, key)
     await update.message.reply_text(f"✅ Innehållet för {title} är uppdaterat.")
     await update.message.reply_html(new_text)
     await _start_photo_step(context, key, update.message)
@@ -802,11 +836,13 @@ async def _handle_done_photos(
 
     pool = _db_pool(context)
     if pool is None:
+        await _forget_step_prompt(context)
         await query.edit_message_text("Databasen är inte redo. Försök igen senare.")
         return
 
     await db.replace_photos(pool, key, file_ids, user_id)
     _update_photos_cache(context, key, file_ids)
+    _touch_freshness(context, key)
     await _forget_step_prompt(context)
     await query.edit_message_text(f"✅ {len(file_ids)} foto sparade för {title}.")
     await _start_link_step(context, key, query.message)
@@ -854,11 +890,13 @@ async def _handle_done_links(
 
     pool = _db_pool(context)
     if pool is None:
+        await _forget_step_prompt(context)
         await query.edit_message_text("Databasen är inte redo. Försök igen senare.")
         return
 
     await db.append_links(pool, key, items, user_id)
     _append_links_cache(context, key, items)
+    _touch_freshness(context, key)
     _clear_link_state(context)
     await _forget_step_prompt(context)
     await query.edit_message_text(
@@ -959,6 +997,7 @@ async def on_startup(application: Application) -> None:
     application.bot_data[_CONTENT_CACHE_KEY] = cache
     application.bot_data[_PHOTOS_CACHE_KEY] = await db.fetch_all_photo_ids(pool)
     application.bot_data[_LINKS_CACHE_KEY] = await db.fetch_all_links(pool)
+    application.bot_data[_FRESHNESS_CACHE_KEY] = await db.fetch_last_activity(pool)
     logger.info("База готова. Текстов в кэше: %s.", len(cache))
 
 

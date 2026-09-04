@@ -1,6 +1,7 @@
 """Проверяем меню без сети: кнопки, ключи, баннеры и сборку приложения."""
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +32,10 @@ from telegram_meny_abmrab import (  # noqa: E402
     topic_card_markup,
     topic_keyboard,
     topic_title,
+    _FRESHNESS_CACHE_KEY,
     _LINKS_CACHE_KEY,
+    NEW_MARK_TTL,
+    is_topic_new,
 )
 
 EXPECTED_BANNERS = {
@@ -68,6 +72,7 @@ def test_topic_titles_and_card_captions() -> None:
     assert topic_title("📰 Nyheter") == "Nyheter"
     assert topic_title("🌿 Longevity Club 100+") == "Longevity Club 100+"
     assert menu_card_caption("💧 Aquatone") == "<b>Aquatone</b>"
+    assert menu_card_caption("📰 Nyheter", is_new=True) == "<b>🆕 Nyheter</b>"
 
 
 def test_topic_card_has_matching_button() -> None:
@@ -77,6 +82,13 @@ def test_topic_card_has_matching_button() -> None:
         assert len(buttons) == 1
         assert buttons[0].callback_data == key
         assert buttons[0].text == label
+
+
+def test_new_topic_button_keeps_callback() -> None:
+    markup = topic_card_markup("nyheter", "📰 Nyheter", is_new=True)
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "🆕 📰 Nyheter"
+    assert button.callback_data == "nyheter"
 
 
 def test_channel_menu_uses_deep_links() -> None:
@@ -198,3 +210,30 @@ def test_redigera_menu_has_edit_callbacks_and_cancel() -> None:
     callbacks = [button.callback_data for button in buttons]
     assert callbacks[-1] == "cancel_edit"
     assert callbacks[:-1] == [f"edit_{key}" for key, _label, _text, _banner in MENU_ITEMS]
+
+
+def _freshness_context(last_at: datetime | None) -> SimpleNamespace:
+    cache: dict[str, datetime] = {}
+    if last_at is not None:
+        cache["nyheter"] = last_at
+    return SimpleNamespace(
+        application=SimpleNamespace(bot_data={_FRESHNESS_CACHE_KEY: cache})
+    )
+
+
+def test_new_mark_ttl_is_two_days() -> None:
+    assert NEW_MARK_TTL == timedelta(days=2)
+
+
+def test_is_topic_new_within_two_days() -> None:
+    recent = datetime.now(timezone.utc) - timedelta(hours=12)
+    assert is_topic_new(_freshness_context(recent), "nyheter") is True
+
+
+def test_is_topic_new_after_two_days() -> None:
+    old = datetime.now(timezone.utc) - timedelta(days=2, seconds=1)
+    assert is_topic_new(_freshness_context(old), "nyheter") is False
+
+
+def test_is_topic_new_without_timestamp() -> None:
+    assert is_topic_new(_freshness_context(None), "nyheter") is False
