@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from telegram.constants import MessageLimit
@@ -12,16 +13,25 @@ os.environ.setdefault("BOT_TOKEN", "0000000000:TESTTOKEN_FOR_UNIT_TESTS_ONLY")
 from telegram_meny_abmrab import (  # noqa: E402
     BANNER_FILES,
     CONTENT,
+    DEFAULT_CONTENT,
     MENU_ITEMS,
+    TOPIC_KEYS,
     _SCRIPT_DIR,
     banner_path,
     banners_dir,
     build_application,
     channel_menu,
+    is_admin,
+    link_button_label,
     load_token,
+    normalize_url,
     menu_card_caption,
+    parse_admin_ids,
+    redigera_menu,
     topic_card_markup,
+    topic_keyboard,
     topic_title,
+    _LINKS_CACHE_KEY,
 )
 
 EXPECTED_BANNERS = {
@@ -43,6 +53,8 @@ def test_menu_items_are_four_tuples() -> None:
 def test_content_and_banner_keys_match_menu_items() -> None:
     keys = {key for key, _label, _text, _banner in MENU_ITEMS}
     assert set(CONTENT) == keys
+    assert set(DEFAULT_CONTENT) == keys
+    assert TOPIC_KEYS == keys
     assert set(BANNER_FILES) == keys
     assert BANNER_FILES == EXPECTED_BANNERS
 
@@ -135,4 +147,54 @@ def test_load_token_rejects_placeholder(monkeypatch: pytest.MonkeyPatch) -> None
 def test_build_application_registers_handlers() -> None:
     app = build_application("0000000000:TESTTOKEN_FOR_UNIT_TESTS_ONLY")
     assert isinstance(app, Application)
-    assert len(app.handlers[0]) >= 4
+    assert len(app.handlers[0]) >= 7
+
+
+def test_parse_admin_ids() -> None:
+    assert parse_admin_ids("111111111,222222222") == {111111111, 222222222}
+    assert parse_admin_ids("  42 , , 7 ") == {42, 7}
+    assert parse_admin_ids("") == set()
+
+
+def test_is_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_IDS", "100,200")
+    assert is_admin(100) is True
+    assert is_admin(200) is True
+    assert is_admin(999) is False
+
+
+def test_normalize_url_accepts_http_and_bare_hosts() -> None:
+    assert normalize_url("https://youtu.be/abc") == "https://youtu.be/abc"
+    assert normalize_url("youtube.com/watch?v=1") == "https://youtube.com/watch?v=1"
+    assert normalize_url("hej på dig") is None
+    assert normalize_url("") is None
+
+
+def test_link_button_label_for_youtube_and_other() -> None:
+    assert link_button_label("https://youtu.be/abc") == "▶️ Titta på YouTube"
+    assert link_button_label("https://www.youtube.com/watch?v=1") == "▶️ Titta på YouTube"
+    assert link_button_label("https://example.com/page") == "🔗 Läs mer"
+
+
+def test_topic_keyboard_puts_links_before_back() -> None:
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                _LINKS_CACHE_KEY: {
+                    "nyheter": [("https://youtu.be/abc", "▶️ Titta på YouTube")]
+                }
+            }
+        )
+    )
+    markup = topic_keyboard(context, "nyheter")
+    rows = markup.inline_keyboard
+    assert rows[0][0].url == "https://youtu.be/abc"
+    assert rows[-1][0].callback_data == "menu"
+
+
+def test_redigera_menu_has_edit_callbacks_and_cancel() -> None:
+    markup = redigera_menu()
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    callbacks = [button.callback_data for button in buttons]
+    assert callbacks[-1] == "cancel_edit"
+    assert callbacks[:-1] == [f"edit_{key}" for key, _label, _text, _banner in MENU_ITEMS]
