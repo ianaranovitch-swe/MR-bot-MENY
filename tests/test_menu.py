@@ -237,3 +237,15 @@ def test_is_topic_new_after_two_days() -> None:
 
 def test_is_topic_new_without_timestamp() -> None:
     assert is_topic_new(_freshness_context(None), "nyheter") is False
+
+
+def test_is_topic_new_only_the_edited_topic() -> None:
+    recent = datetime.now(timezone.utc)
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={_FRESHNESS_CACHE_KEY: {"nyheter": recent}}
+        )
+    )
+    assert is_topic_new(context, "nyheter") is True
+    assert is_topic_new(context, "aquatone") is False
+    assert is_topic_new(context, "biotrem") is False

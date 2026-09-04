@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS content_links (
 );
 """
 
+# Отдельная дата «контент обновили». Названия рубрик сюда не входят.
+ADD_CONTENT_FRESH_AT_SQL = """
+ALTER TABLE content
+ADD COLUMN IF NOT EXISTS content_fresh_at TIMESTAMPTZ;
+"""
+
 
 def load_database_url() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
@@ -60,6 +66,7 @@ async def init_schema(pool: asyncpg.Pool) -> None:
     await pool.execute(CREATE_CONTENT_SQL)
     await pool.execute(CREATE_PHOTOS_SQL)
     await pool.execute(CREATE_LINKS_SQL)
+    await pool.execute(ADD_CONTENT_FRESH_AT_SQL)
 
 
 async def seed_content_if_empty(
@@ -90,12 +97,13 @@ async def upsert_content(
 ) -> None:
     await pool.execute(
         """
-        INSERT INTO content (key, text, updated_by, updated_at)
-        VALUES ($1, $2, $3, now())
+        INSERT INTO content (key, text, updated_by, updated_at, content_fresh_at)
+        VALUES ($1, $2, $3, now(), now())
         ON CONFLICT (key) DO UPDATE
         SET text = EXCLUDED.text,
             updated_by = EXCLUDED.updated_by,
-            updated_at = now()
+            updated_at = now(),
+            content_fresh_at = now()
         """,
         key,
         text,
@@ -147,6 +155,10 @@ async def replace_photos(
                     position,
                     added_by,
                 )
+            await connection.execute(
+                "UPDATE content SET content_fresh_at = now() WHERE key = $1",
+                key,
+            )
 
 
 async def fetch_all_links(pool: asyncpg.Pool) -> dict[str, list[tuple[str, str]]]:
@@ -190,27 +202,19 @@ async def append_links(
                     start + offset,
                     added_by,
                 )
+            await connection.execute(
+                "UPDATE content SET content_fresh_at = now() WHERE key = $1",
+                key,
+            )
 
 
 async def fetch_last_activity(pool: asyncpg.Pool) -> dict[str, object]:
-    """Когда рубрику трогали в последний раз: текст, фото или ссылка."""
-    """Когда рубрику трогали в последний раз: текст, фото или ссылка."""
+    """Только рубрики, где админ менял текст, фото или ссылки — не сами названия меню."""
     rows = await pool.fetch(
         """
-        SELECT
-            c.key,
-            GREATEST(
-                COALESCE(c.updated_at, TIMESTAMPTZ '1970-01-01+00'),
-                COALESCE(
-                    (SELECT MAX(p.added_at) FROM content_photos p WHERE p.key = c.key),
-                    TIMESTAMPTZ '1970-01-01+00'
-                ),
-                COALESCE(
-                    (SELECT MAX(l.added_at) FROM content_links l WHERE l.key = c.key),
-                    TIMESTAMPTZ '1970-01-01+00'
-                )
-            ) AS last_at
-        FROM content c
+        SELECT key, content_fresh_at AS last_at
+        FROM content
+        WHERE content_fresh_at IS NOT NULL
         """
     )
     return {str(row["key"]): row["last_at"] for row in rows}

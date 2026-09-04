@@ -212,7 +212,7 @@ def _as_utc(moment: datetime) -> datetime:
 
 
 def is_topic_new(context: ContextTypes.DEFAULT_TYPE, key: str) -> bool:
-    """🆕 два дня после правки текста, фото или ссылок."""
+    """🆕 только у той рубрики, где админ менял текст, фото или ссылки."""
     cache = context.application.bot_data.get(_FRESHNESS_CACHE_KEY, {})
     if not isinstance(cache, dict):
         return False
