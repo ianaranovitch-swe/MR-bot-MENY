@@ -28,7 +28,7 @@ from telegram import (
     Message,
     Update,
 )
-from telegram.constants import ChatMemberStatus, ParseMode
+from telegram.constants import ChatMemberStatus, MessageLimit, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -118,6 +118,8 @@ _ADMIN_LINK_CALLBACKS = {
     "skip_photos",
     "done_links",
     "skip_links",
+    "publish_channel",
+    "no_publish",
 }
 
 
@@ -385,6 +387,60 @@ def link_step_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⏭️ Hoppa över", callback_data="skip_links"),
             ]
         ]
+    )
+
+
+def publish_offer_text(photo_count: int, link_count: int) -> str:
+    """Вопрос после сохранения: публиковать ли то же обновление в канал."""
+    return (
+        f"✅ Innehållet är sparat i boten (text, {photo_count} nya foto, "
+        f"{link_count} nya länkar). Vill du också publicera det som ett "
+        f"nytt inlägg i kanalen {CHANNEL}?"
+    )
+
+
+def publish_offer_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📢 Publicera i kanalen", callback_data="publish_channel"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚫 Publicera inte nu", callback_data="no_publish"
+                )
+            ],
+        ]
+    )
+
+
+def channel_update_caption(label: str, session_text: str) -> str:
+    """Заголовок поста в канале + уже готовый HTML-текст рубрики."""
+    return f"🆕 <b>{html.escape(label)}</b>\n\n{session_text}"
+
+
+def session_photo_ids(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    raw = context.user_data.get("photo_buffer") or []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def session_link_items(context: ContextTypes.DEFAULT_TYPE) -> list[tuple[str, str]]:
+    raw = context.user_data.get("link_buffer") or []
+    items: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, tuple) and len(item) == 2:
+            items.append((str(item[0]), str(item[1])))
+    return items
+
+
+def session_link_markup(items: list[tuple[str, str]]) -> InlineKeyboardMarkup | None:
+    """Кнопки только для ссылок этой сессии — старые ссылки меню сюда не кладём."""
+    if not items:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(label, url=url)] for url, label in items]
     )
 
 
@@ -917,6 +973,8 @@ async def handle_admin_text(
     await db.upsert_content(pool, key, new_text, update.effective_user.id)
     _update_content_cache(context, key, new_text)
     _touch_freshness(context, key)
+    context.user_data["session_key"] = key
+    context.user_data["session_text"] = new_text
     await update.message.reply_text(f"✅ Innehållet för {title} är uppdaterat.")
     await update.message.reply_html(new_text)
     await _start_photo_step(context, key, update.message)
@@ -956,10 +1014,20 @@ def _clear_link_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["link_buffer"] = []
 
 
+def _clear_edit_session(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """После публикации или отказа стираем всю сессию правки."""
+    context.user_data["awaiting_edit"] = None
+    context.user_data["session_key"] = None
+    context.user_data["session_text"] = None
+    _clear_photo_state(context)
+    _clear_link_state(context)
+
+
 async def _start_link_step(
     context: ContextTypes.DEFAULT_TYPE, key: str, message: Message
 ) -> None:
-    _clear_photo_state(context)
+    # Фото этой сессии оставляем: они ещё понадобятся для поста в канал.
+    context.user_data["awaiting_photos"] = None
     context.user_data["awaiting_links"] = key
     context.user_data["link_buffer"] = []
     await _send_step_prompt(
@@ -1007,13 +1075,14 @@ async def _handle_done_photos(
     buffer = context.user_data.get("photo_buffer") or []
     file_ids = [item for item in buffer if isinstance(item, str)]
     if not isinstance(key, str) or key not in TOPIC_KEYS:
-        _clear_photo_state(context)
+        _clear_edit_session(context)
         await _forget_step_prompt(context)
         await query.edit_message_text("Redigeringen är avbruten.")
         return
 
     title = topic_display_name(key)
     if not file_ids:
+        context.user_data["photo_buffer"] = []
         await _forget_step_prompt(context)
         await query.edit_message_text(
             "Inga foton sparades — innehållet är oförändrat vad gäller bilder."
@@ -1037,6 +1106,7 @@ async def _handle_done_photos(
 
 async def _handle_skip_photos(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = context.user_data.get("awaiting_photos")
+    context.user_data["photo_buffer"] = []
     await _forget_step_prompt(context)
     await query.edit_message_text(
         "Innehållet är sparat utan ändringar av foton."
@@ -1044,22 +1114,31 @@ async def _handle_skip_photos(query, context: ContextTypes.DEFAULT_TYPE) -> None
     if isinstance(key, str) and key in TOPIC_KEYS:
         await _start_link_step(context, key, query.message)
         return
-    _clear_photo_state(context)
+    _clear_edit_session(context)
+
+
+async def _offer_channel_publish(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    """Финальный вопрос: сохранить только в боте или ещё и пост в канал."""
+    context.user_data["awaiting_links"] = None
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=publish_offer_text(
+            len(session_photo_ids(context)),
+            len(session_link_items(context)),
+        ),
+        reply_markup=publish_offer_markup(),
+    )
 
 
 async def _handle_done_links(
     query, context: ContextTypes.DEFAULT_TYPE, user_id: int
 ) -> None:
     key = context.user_data.get("awaiting_links")
-    buffer = context.user_data.get("link_buffer") or []
-    items = [
-        (str(url), str(label))
-        for item in buffer
-        if isinstance(item, tuple) and len(item) == 2
-        for url, label in [item]
-    ]
+    items = session_link_items(context)
     if not isinstance(key, str) or key not in TOPIC_KEYS:
-        _clear_link_state(context)
+        _clear_edit_session(context)
         await _forget_step_prompt(context)
         await query.edit_message_text("Redigeringen är avbruten.")
         return
@@ -1067,12 +1146,12 @@ async def _handle_done_links(
     title = topic_display_name(key)
     chat_id = query.message.chat_id
     if not items:
-        _clear_link_state(context)
         await _forget_step_prompt(context)
         await query.edit_message_text(
             f"Inga länkar lades till. ✅ Rubriken {title} är helt uppdaterad."
         )
         await _show_topic_preview(context, chat_id, key)
+        await _offer_channel_publish(context, chat_id)
         return
 
     pool = _db_pool(context)
@@ -1084,28 +1163,144 @@ async def _handle_done_links(
     await db.append_links(pool, key, items, user_id)
     _append_links_cache(context, key, items)
     _touch_freshness(context, key)
-    _clear_link_state(context)
     await _forget_step_prompt(context)
     await query.edit_message_text(
         f"✅ {len(items)} nya länkar tillagda för {title}. "
         f"Rubriken är helt uppdaterad."
     )
     await _show_topic_preview(context, chat_id, key)
+    await _offer_channel_publish(context, chat_id)
 
 
 async def _handle_skip_links(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = context.user_data.get("awaiting_links")
     title = topic_display_name(key) if isinstance(key, str) else ""
     chat_id = query.message.chat_id
-    _clear_link_state(context)
+    context.user_data["link_buffer"] = []
     await _forget_step_prompt(context)
     if title and isinstance(key, str) and key in TOPIC_KEYS:
         await query.edit_message_text(
             f"Inga länkar lades till. ✅ Rubriken {title} är helt uppdaterad."
         )
         await _show_topic_preview(context, chat_id, key)
+        await _offer_channel_publish(context, chat_id)
         return
+    _clear_edit_session(context)
     await query.edit_message_text("Redigeringen är avslutad.")
+
+
+async def _send_session_photos_to_channel(
+    bot: Bot, file_ids: list[str]
+) -> None:
+    """Новые фото сессии — отдельными постами после баннера, пачками по 10."""
+    if not file_ids:
+        return
+    if len(file_ids) == 1:
+        await bot.send_photo(chat_id=CHANNEL, photo=file_ids[0])
+        return
+    for chunk in db.chunk_ids(file_ids, 10):
+        if len(chunk) == 1:
+            await bot.send_photo(chat_id=CHANNEL, photo=chunk[0])
+        else:
+            await bot.send_media_group(
+                chat_id=CHANNEL,
+                media=[InputMediaPhoto(file_id) for file_id in chunk],
+            )
+
+
+async def _handle_publish_channel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    key = context.user_data.get("session_key")
+    session_text = context.user_data.get("session_text")
+    if not isinstance(key, str) or key not in TOPIC_KEYS:
+        _clear_edit_session(context)
+        await query.edit_message_text("Redigeringen är avbruten.")
+        return
+    if not isinstance(session_text, str) or not session_text.strip():
+        session_text = topic_text(context, key)
+
+    link = await inspect_channel_link(context.bot)
+    if not link.can_post:
+        await query.edit_message_text(format_channel_link_report(link))
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=publish_offer_text(
+                len(session_photo_ids(context)),
+                len(session_link_items(context)),
+            ),
+            reply_markup=publish_offer_markup(),
+        )
+        return
+
+    label = topic_display_name(key)
+    caption = channel_update_caption(label, session_text)
+    markup = session_link_markup(session_link_items(context))
+    extra_photos = session_photo_ids(context)
+    photo = _cached_file_id(context, key) or banner_path(key)
+    caption_fits = len(caption) <= MessageLimit.CAPTION_LENGTH
+
+    try:
+        if photo is not None and caption_fits:
+            sent = await context.bot.send_photo(
+                chat_id=CHANNEL,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+            _remember_file_id(context, key, sent)
+        elif photo is not None:
+            short = f"🆕 <b>{html.escape(label)}</b>"
+            sent = await context.bot.send_photo(
+                chat_id=CHANNEL,
+                photo=photo,
+                caption=short,
+                parse_mode=ParseMode.HTML,
+            )
+            _remember_file_id(context, key, sent)
+            await context.bot.send_message(
+                chat_id=CHANNEL,
+                text=session_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+        await _send_session_photos_to_channel(context.bot, extra_photos)
+    except Forbidden:
+        await query.edit_message_text(
+            f"Boten får inte skriva i {CHANNEL}. "
+            f"Gör @{EXPECTED_BOT_USERNAME} till administratör först."
+        )
+        return
+    except TelegramError:
+        logger.exception("Не удалось опубликовать обновление в %s", CHANNEL)
+        await query.edit_message_text(
+            f"Inlägget kunde inte publiceras i {CHANNEL}. Försök igen."
+        )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=publish_offer_text(
+                len(session_photo_ids(context)),
+                len(session_link_items(context)),
+            ),
+            reply_markup=publish_offer_markup(),
+        )
+        return
+
+    _clear_edit_session(context)
+    await query.edit_message_text(f"✅ Publicerat i kanalen {CHANNEL}!")
+
+
+async def _handle_no_publish(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_edit_session(context)
+    await query.edit_message_text(
+        "OK, inlägget publicerades inte i kanalen — bara sparat i boten."
+    )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1126,9 +1321,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             key = data.removeprefix("edit_")
             if key not in TOPIC_KEYS:
                 return
+            _clear_edit_session(context)
             context.user_data["awaiting_edit"] = key
-            _clear_photo_state(context)
-            _clear_link_state(context)
             await _forget_step_prompt(context)
             title = topic_display_name(key)
             await query.edit_message_text(
@@ -1138,9 +1332,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
         if data == "cancel_edit":
-            context.user_data["awaiting_edit"] = None
-            _clear_photo_state(context)
-            _clear_link_state(context)
+            _clear_edit_session(context)
             await _forget_step_prompt(context)
             await _show_redigera_menu_on_query(query)
             return
@@ -1153,7 +1345,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if data == "done_links":
             await _handle_done_links(query, context, user_id)
             return
-        await _handle_skip_links(query, context)
+        if data == "skip_links":
+            await _handle_skip_links(query, context)
+            return
+        if data == "publish_channel":
+            await _handle_publish_channel(query, context)
+            return
+        await _handle_no_publish(query, context)
         return
 
     if data == "menu":

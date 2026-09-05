@@ -32,8 +32,12 @@ from telegram_meny_abmrab import (  # noqa: E402
     normalize_url,
     menu_card_caption,
     parse_admin_ids,
+    publish_offer_markup,
+    publish_offer_text,
+    channel_update_caption,
     redigera_menu,
     remaining_menu_items,
+    session_link_markup,
     topic_card_markup,
     topic_keyboard,
     topic_title,
@@ -256,6 +260,38 @@ def test_topic_keyboard_puts_links_before_back() -> None:
     rows = markup.inline_keyboard
     assert rows[0][0].url == "https://youtu.be/abc"
     assert rows[-1][0].callback_data == "menu"
+
+
+def test_publish_offer_mentions_channel_and_counts() -> None:
+    text = publish_offer_text(2, 1)
+    assert "2 nya foto" in text
+    assert "1 nya länkar" in text
+    assert CHANNEL in text
+
+
+def test_publish_offer_buttons() -> None:
+    markup = publish_offer_markup()
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert [button.callback_data for button in buttons] == [
+        "publish_channel",
+        "no_publish",
+    ]
+
+
+def test_channel_update_caption_keeps_html_text() -> None:
+    caption = channel_update_caption("Nyheter", "<b>Hej</b>")
+    assert caption == "🆕 <b>Nyheter</b>\n\n<b>Hej</b>"
+
+
+def test_session_link_markup_only_session_urls() -> None:
+    assert session_link_markup([]) is None
+    markup = session_link_markup(
+        [("https://youtu.be/abc", "▶️ Titta på YouTube")]
+    )
+    assert markup is not None
+    button = markup.inline_keyboard[0][0]
+    assert button.url == "https://youtu.be/abc"
+    assert button.callback_data is None
 
 
 def test_redigera_menu_has_edit_callbacks_and_cancel() -> None:
