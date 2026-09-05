@@ -13,15 +13,19 @@ os.environ.setdefault("BOT_TOKEN", "0000000000:TESTTOKEN_FOR_UNIT_TESTS_ONLY")
 
 from telegram_meny_abmrab import (  # noqa: E402
     BANNER_FILES,
+    CHANNEL,
     CONTENT,
     DEFAULT_CONTENT,
+    EXPECTED_BOT_USERNAME,
     MENU_ITEMS,
     TOPIC_KEYS,
+    ChannelLinkStatus,
     _SCRIPT_DIR,
     banner_path,
     banners_dir,
     build_application,
     channel_menu,
+    format_channel_link_report,
     is_admin,
     link_button_label,
     load_token,
@@ -102,14 +106,53 @@ def test_new_topic_button_keeps_callback() -> None:
     assert button.callback_data == "nyheter"
 
 
+def test_channel_and_bot_names() -> None:
+    assert EXPECTED_BOT_USERNAME == "MRAB_SWE_bot"
+    assert CHANNEL.startswith("@")
+
+
 def test_channel_menu_uses_deep_links() -> None:
-    markup = channel_menu("abmrab_meny_bot")
+    markup = channel_menu(EXPECTED_BOT_USERNAME)
     buttons = [button for row in markup.inline_keyboard for button in row]
     urls = [button.url for button in buttons]
     assert urls == [
-        f"https://t.me/abmrab_meny_bot?start={key}"
+        f"https://t.me/{EXPECTED_BOT_USERNAME}?start={key}"
         for key, _label, _text, _banner in MENU_ITEMS
     ]
+
+
+def test_channel_link_report_explains_missing_admin() -> None:
+    text = format_channel_link_report(
+        ChannelLinkStatus(
+            channel="@abmrab",
+            bot_username="MRAB_SWE_bot",
+            channel_title=None,
+            bot_status=None,
+            can_post=False,
+            can_pin=False,
+            error="boten är inte administratör i kanalen ännu",
+        )
+    )
+    assert "Kanal: @abmrab" in text
+    assert "Bot: @MRAB_SWE_bot" in text
+    assert "inte klar" in text
+    assert "Add Administrator" in text
+
+
+def test_channel_link_report_ready_to_publish() -> None:
+    text = format_channel_link_report(
+        ChannelLinkStatus(
+            channel="@abmrab",
+            bot_username="MRAB_SWE_bot",
+            channel_title="ABMRAB",
+            bot_status="administrator",
+            can_post=True,
+            can_pin=True,
+            error=None,
+        )
+    )
+    assert "Kan publicera: ja" in text
+    assert "/publicera_meny" in text
 
 
 def test_banner_path_missing_file_returns_none(

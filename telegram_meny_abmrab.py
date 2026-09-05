@@ -4,6 +4,9 @@
 на первом экране — шесть карточек с баннерами.
 Текст, фото и ссылки рубрики админ меняет командой /redigera.
 Баннеры из папки banners/ при этом не трогаем.
+
+Канал: @abmrab
+Бот: @MRAB_SWE_bot
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -51,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 CHANNEL = os.getenv("CHANNEL", "@abmrab").strip()
+EXPECTED_BOT_USERNAME = "MRAB_SWE_bot"
 
 # Один список тем: ключ, кнопка, текст по умолчанию, имя файла-баннера.
 MENU_ITEMS: tuple[tuple[str, str, str, str], ...] = (
@@ -129,6 +134,105 @@ def parse_admin_ids(raw: str | None = None) -> set[int]:
 
 def is_admin(user_id: int) -> bool:
     return user_id in parse_admin_ids()
+
+
+@dataclass(frozen=True)
+class ChannelLinkStatus:
+    """Связка бота с каналом: что уже есть и чего не хватает."""
+
+    channel: str
+    bot_username: str | None
+    channel_title: str | None
+    bot_status: str | None
+    can_post: bool
+    can_pin: bool
+    error: str | None
+
+
+def _member_can_post(member: object) -> bool:
+    status = getattr(member, "status", None)
+    if status == ChatMemberStatus.OWNER:
+        return True
+    return bool(getattr(member, "can_post_messages", False))
+
+
+def _member_can_pin(member: object) -> bool:
+    status = getattr(member, "status", None)
+    if status == ChatMemberStatus.OWNER:
+        return True
+    return bool(getattr(member, "can_pin_messages", False))
+
+
+def format_channel_link_report(status: ChannelLinkStatus) -> str:
+    """Текст для человека: канал и бот связаны или нет."""
+    bot_name = f"@{status.bot_username}" if status.bot_username else "@?"
+    lines = [
+        f"Kanal: {status.channel}",
+        f"Bot: {bot_name}",
+    ]
+    if status.error:
+        lines.append(f"Koppling: inte klar. {status.error}")
+        lines.append(
+            f"Gör så här i Telegram: öppna {status.channel} → "
+            "Administrators → Add Administrator → "
+            f"@{EXPECTED_BOT_USERNAME}. "
+            "Slå på Post Messages, Edit Messages och Pin Messages. "
+            "Sedan skriv /publicera_meny här."
+        )
+        return "\n".join(lines)
+
+    lines.append(f"Kanalens namn: {status.channel_title or '?'}")
+    lines.append(f"Botens roll: {status.bot_status or '?'}")
+    lines.append(f"Kan publicera: {'ja' if status.can_post else 'nej'}")
+    lines.append(f"Kan fästa: {'ja' if status.can_pin else 'nej'}")
+    if status.can_post:
+        lines.append("Kopplingen är klar. Skriv /publicera_meny för att lägga menyn i kanalen.")
+    else:
+        lines.append(
+            "Boten syns i kanalen men får inte publicera. "
+            "Slå på Post Messages för "
+            f"@{EXPECTED_BOT_USERNAME} i {status.channel}."
+        )
+    return "\n".join(lines)
+
+
+async def inspect_channel_link(bot: Bot) -> ChannelLinkStatus:
+    """Спрашиваем Telegram: видит ли бот канал и может ли туда писать."""
+    me = await bot.get_me()
+    username = me.username
+    try:
+        chat = await bot.get_chat(CHANNEL)
+        member = await bot.get_chat_member(CHANNEL, me.id)
+    except Forbidden:
+        return ChannelLinkStatus(
+            channel=CHANNEL,
+            bot_username=username,
+            channel_title=None,
+            bot_status=None,
+            can_post=False,
+            can_pin=False,
+            error="boten är inte administratör i kanalen ännu",
+        )
+    except (BadRequest, TelegramError) as error:
+        logger.info("Проверка канала %s не удалась: %s", CHANNEL, error)
+        return ChannelLinkStatus(
+            channel=CHANNEL,
+            bot_username=username,
+            channel_title=None,
+            bot_status=None,
+            can_post=False,
+            can_pin=False,
+            error="boten når inte kanalen ännu",
+        )
+    return ChannelLinkStatus(
+        channel=CHANNEL,
+        bot_username=username,
+        channel_title=getattr(chat, "title", None),
+        bot_status=str(getattr(member, "status", "")),
+        can_post=_member_can_post(member),
+        can_pin=_member_can_pin(member),
+        error=None,
+    )
 
 
 def normalize_url(raw: str) -> str | None:
@@ -610,11 +714,27 @@ async def _is_channel_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
     return member.status in ADMIN_STATUSES
 
 
+async def check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ видит, связана ли личка бота с каналом @abmrab."""
+    if update.message is None or update.effective_user is None:
+        return
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Du har inte behörighet.")
+        return
+    status = await inspect_channel_link(context.bot)
+    await update.message.reply_text(format_channel_link_report(status))
+
+
 async def publish_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or update.effective_user is None:
         return
 
     try:
+        link = await inspect_channel_link(context.bot)
+        if not link.can_post:
+            await update.message.reply_text(format_channel_link_report(link))
+            return
+
         if not await _is_channel_admin(context, update.effective_user.id):
             await update.message.reply_text(
                 "Bara en administratör i kanalen kan publicera menyn."
@@ -647,14 +767,15 @@ async def publish_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info("Меню опубликовано, message_id=%s", sent.message_id)
     except Forbidden:
         await update.message.reply_text(
-            "Boten får inte skriva i kanalen. Gör boten till administratör "
-            "och tillåt att publicera och fästa inlägg."
+            f"Boten @{EXPECTED_BOT_USERNAME} får inte skriva i {CHANNEL}. "
+            "Gör boten till administratör och tillåt att publicera och fästa inlägg."
         )
         logger.exception("Нет прав на публикацию в %s", CHANNEL)
     except TelegramError:
         await update.message.reply_text(
-            "Menyn kunde inte publiceras. Kontrollera att boten är administratör "
-            "i kanalen och får publicera och redigera inlägg."
+            f"Menyn kunde inte publiceras i {CHANNEL}. "
+            f"Kontrollera att @{EXPECTED_BOT_USERNAME} är administratör "
+            "och får publicera och redigera inlägg."
         )
         logger.exception("Ошибка публикации меню в %s", CHANNEL)
 
@@ -1062,6 +1183,21 @@ async def on_startup(application: Application) -> None:
     application.bot_data[_LINKS_CACHE_KEY] = await db.fetch_all_links(pool)
     application.bot_data[_FRESHNESS_CACHE_KEY] = await db.fetch_last_activity(pool)
     logger.info("База готова. Текстов в кэше: %s.", len(cache))
+    link = await inspect_channel_link(application.bot)
+    if link.can_post:
+        logger.info(
+            "Канал связан: %s ↔ @%s (роль %s).",
+            CHANNEL,
+            link.bot_username,
+            link.bot_status,
+        )
+    else:
+        logger.warning(
+            "Канал %s ещё не связан с @%s: %s",
+            CHANNEL,
+            link.bot_username or EXPECTED_BOT_USERNAME,
+            link.error or "нет права публиковать",
+        )
 
 
 async def on_shutdown(application: Application) -> None:
@@ -1083,6 +1219,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("start", start, filters=private))
     app.add_handler(CommandHandler("menu", start, filters=private))
     app.add_handler(CommandHandler("publicera_meny", publish_menu, filters=private))
+    app.add_handler(CommandHandler("kolla_kanal", check_channel, filters=private))
     app.add_handler(CommandHandler("redigera", redigera, filters=private))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO & private, handle_photo))
@@ -1096,7 +1233,11 @@ def main() -> None:
     token = load_token()
     log_banner_status()
     app = build_application(token)
-    logger.info("Бот запущен. Канал: %s. Остановка: Ctrl+C.", CHANNEL)
+    logger.info(
+        "Бот запущен. Канал: %s. Ожидаемый бот: @%s. Остановка: Ctrl+C.",
+        CHANNEL,
+        EXPECTED_BOT_USERNAME,
+    )
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 

@@ -1,5 +1,8 @@
 # Меню-бот для Telegram-канала
 
+Канал: `@abmrab`  
+Бот: `@MRAB_SWE_bot`
+
 Бот показывает меню тем (Nyheter, Aquatone, Biotrem, Monicor, Kvantresonans,
 Longevity Club 100+). В канале кнопки открывают личный чат с ботом.
 Каждая тема на первом экране бота — это карточка: баннер и крупное название.
@@ -78,22 +81,24 @@ pytest
 ## Пошаговый запуск в Telegram
 
 1. Открой Telegram и найди `@BotFather`.
-2. Напиши `/newbot`, придумай имя и username (например `ABMRAB Meny` и `abmrab_meny_bot`).
-3. Скопируй токен в `.env` как `BOT_TOKEN=...`.
-4. У `@BotFather` выполни `/setprivacy` → выбери бота → `Disable` (не обязательно, но удобно).
-5. Открой свой канал `@abmrab` → Administrators → Add Administrator → найди бота.
+2. Бот уже есть: `@MRAB_SWE_bot`. Новый `/newbot` не нужен.
+3. Токен этого бота лежит в `.env` / Railway как `BOT_TOKEN`.
+4. У `@BotFather` выполни `/setprivacy` → `@MRAB_SWE_bot` → `Disable` (не обязательно, но удобно).
+5. Открой канал `@abmrab` (не личку бота) → Administrators → Add Administrator → `@MRAB_SWE_bot`.
 6. Включи права бота:
    - Post Messages
    - Edit Messages
    - Pin Messages
 7. Запусти бота командой `python telegram_meny_abmrab.py`.
-8. В личке с ботом напиши `/start` — должно появиться меню.
-9. Напиши `/publicera_meny` — пост с кнопками уйдёт в канал и бот попробует закрепить его.
-10. Нажми кнопку в канале: откроется личка бота с нужной темой.
+8. В личке `@MRAB_SWE_bot` напиши `/start` — должно появиться меню.
+9. Напиши `/kolla_kanal` — бот скажет, связана ли он с `@abmrab`.
+10. Если права есть, напиши `/publicera_meny` — пост с кнопками уйдёт в канал.
+11. Нажми кнопку в канале: откроется личка `@MRAB_SWE_bot` с нужной темой.
 
 Команды бота:
 
 - `/start` и `/menu` — меню в личке
+- `/kolla_kanal` — проверка связки `@abmrab` ↔ `@MRAB_SWE_bot` (только `ADMIN_IDS`)
 - `/publicera_meny` — публикация меню в канал (только админ канала)
 - `/redigera` — правка текстов, доп.фото и ссылок рубрик (только `ADMIN_IDS`)
 
@@ -182,7 +187,8 @@ Railway сам найдёт Python. Старт уже прописан в `railw
 2. **Administrators** → **Add Administrator**.
 3. Найди `@MRAB_SWE_bot`.
 4. Включи Post Messages, Edit Messages, Pin Messages.
-5. В личке бота напиши `/publicera_meny`.
+5. В личке `@MRAB_SWE_bot` напиши `/kolla_kanal` — бот скажет, хватает ли прав.
+6. Если всё «ja», напиши `/publicera_meny`.
 
 ## Откат
 
@@ -207,7 +213,8 @@ Railway сам найдёт Python. Старт уже прописан в `railw
 | `ValueError` про `BOT_TOKEN` | Локально: файл `.env`. На Railway: Variables → `BOT_TOKEN` |
 | Бот молчит | Локально окно запущено. На Railway деплой Success и есть логи |
 | «Bara en administratör...» | Команду пишет не админ канала |
-| Меню не публикуется | Бот добавлен админом канала и может постить |
+| `/kolla_kanal` «inte klar» | В `@abmrab` добавь `@MRAB_SWE_bot` админом с Post / Edit / Pin |
+| Меню не публикуется | Бот добавлен админом канала `@abmrab` и может постить |
 | Меню опубликовано, но не закреплено | Включи боту право Pin Messages |
 | Кнопка в канале открывает бота, но пусто | Бот не запущен или токен от другого бота |
 | Конфликт `getUpdates` / 409 | Второй экземпляр с тем же токеном: локально + Railway, два сервиса или два реплики |
