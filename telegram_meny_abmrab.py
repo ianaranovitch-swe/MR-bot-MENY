@@ -106,6 +106,7 @@ CHANNEL_MENU_TEXT = "<b>MENY</b>\n\nVälj ett ämne nedan:"
 ADMIN_STATUSES = {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
 _BANNER_FILE_IDS_KEY = "banner_file_ids"
 _MENU_MESSAGE_IDS_KEY = "menu_message_ids"
+_VIEW_IDS_BY_USER_KEY = "view_message_ids_by_user"
 _CONTENT_CACHE_KEY = "content_cache"
 _PHOTOS_CACHE_KEY = "photos_cache"
 _LINKS_CACHE_KEY = "links_cache"
@@ -540,6 +541,55 @@ def _db_pool(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data.get("db")
 
 
+def merge_message_ids(*groups: object) -> list[int]:
+    """Склеиваем номера сообщений без повторов — как список игрушек в одну коробку."""
+    seen: set[int] = set()
+    result: list[int] = []
+    for group in groups:
+        if isinstance(group, int):
+            items: list[object] = [group]
+        elif isinstance(group, (list, tuple)):
+            items = list(group)
+        else:
+            continue
+        for item in items:
+            if isinstance(item, int) and item not in seen:
+                seen.add(item)
+                result.append(item)
+    return result
+
+
+def _context_user_id(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    user_id = getattr(context, "_user_id", None)
+    return user_id if isinstance(user_id, int) else None
+
+
+def _load_view_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
+    user_id = _context_user_id(context)
+    from_user = context.user_data.get(_MENU_MESSAGE_IDS_KEY)
+    from_bot: object = []
+    if user_id is not None:
+        store = context.application.bot_data.setdefault(_VIEW_IDS_BY_USER_KEY, {})
+        if isinstance(store, dict):
+            from_bot = store.get(user_id, [])
+    return merge_message_ids(from_user, from_bot)
+
+
+def _save_view_ids(context: ContextTypes.DEFAULT_TYPE, message_ids: list[int]) -> None:
+    ids = merge_message_ids(message_ids)
+    context.user_data[_MENU_MESSAGE_IDS_KEY] = ids
+    user_id = _context_user_id(context)
+    if user_id is None:
+        return
+    store = context.application.bot_data.setdefault(_VIEW_IDS_BY_USER_KEY, {})
+    if isinstance(store, dict):
+        store[user_id] = ids
+
+
+def _track_view_id(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
+    _save_view_ids(context, [*_load_view_ids(context), message_id])
+
+
 def _cached_file_id(context: ContextTypes.DEFAULT_TYPE, key: str) -> str | None:
     cache = context.application.bot_data.setdefault(_BANNER_FILE_IDS_KEY, {})
     file_id = cache.get(key)
@@ -556,16 +606,25 @@ def _remember_file_id(
 
 
 async def _delete_menu_messages(
-    bot: Bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+    bot: Bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    extra_ids: list[int] | None = None,
 ) -> None:
-    raw_ids = context.user_data.get(_MENU_MESSAGE_IDS_KEY, [])
-    message_ids = [item for item in raw_ids if isinstance(item, int)]
-    for message_id in message_ids:
+    """Стираем прошлый экран: старые баннеры и открытую рубрику."""
+    message_ids = merge_message_ids(_load_view_ids(context), extra_ids or [])
+    if message_ids:
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except (BadRequest, Forbidden, TelegramError) as error:
-            logger.info("Не удалось удалить карточку меню %s: %s", message_id, error)
-    context.user_data[_MENU_MESSAGE_IDS_KEY] = []
+            await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
+        except (AttributeError, BadRequest, Forbidden, TelegramError):
+            for message_id in message_ids:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except (BadRequest, Forbidden, TelegramError) as error:
+                    logger.info(
+                        "Не удалось удалить карточку меню %s: %s", message_id, error
+                    )
+    _save_view_ids(context, [])
 
 
 async def _send_menu_card(
@@ -575,6 +634,7 @@ async def _send_menu_card(
     key: str,
     label: str,
     context: ContextTypes.DEFAULT_TYPE,
+    track: bool = True,
 ) -> int:
     is_new = is_topic_new(context, key)
     caption = menu_card_caption(label, is_new)
@@ -592,6 +652,8 @@ async def _send_menu_card(
                 disable_notification=True,
             )
             _remember_file_id(context, key, sent)
+            if track:
+                _track_view_id(context, sent.message_id)
             return sent.message_id
         except TelegramError:
             logger.exception("Не удалось отправить баннер меню %s, шлём текст", key)
@@ -603,6 +665,8 @@ async def _send_menu_card(
         reply_markup=markup,
         disable_notification=True,
     )
+    if track:
+        _track_view_id(context, sent.message_id)
     return sent.message_id
 
 
@@ -613,9 +677,13 @@ async def _send_menu_gallery(
     context: ContextTypes.DEFAULT_TYPE,
     exclude_key: str | None = None,
     replace_view: bool = True,
+    extra_delete_ids: list[int] | None = None,
+    track: bool = True,
 ) -> list[int]:
     if replace_view:
-        await _delete_menu_messages(bot, chat_id, context)
+        await _delete_menu_messages(
+            bot, chat_id, context, extra_ids=extra_delete_ids
+        )
     sent_ids: list[int] = []
     items = remaining_menu_items(exclude_key) if exclude_key else MENU_ITEMS
     for key, label, _text, _banner in items:
@@ -626,10 +694,9 @@ async def _send_menu_gallery(
                 key=key,
                 label=label,
                 context=context,
+                track=track,
             )
         )
-    if replace_view:
-        context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
     return sent_ids
 
 
@@ -639,6 +706,7 @@ async def _send_topic_banner(
     chat_id: int,
     key: str,
     context: ContextTypes.DEFAULT_TYPE,
+    track: bool = True,
 ) -> int:
     """Баннер открытой рубрики: картинка сверху, без кнопки (её уже нажали)."""
     label = TOPIC_LABELS.get(key, key)
@@ -655,6 +723,8 @@ async def _send_topic_banner(
                 disable_notification=True,
             )
             _remember_file_id(context, key, sent)
+            if track:
+                _track_view_id(context, sent.message_id)
             return sent.message_id
         except TelegramError:
             logger.exception("Не удалось отправить баннер рубрики %s, шлём текст", key)
@@ -665,11 +735,17 @@ async def _send_topic_banner(
         parse_mode=ParseMode.HTML,
         disable_notification=True,
     )
+    if track:
+        _track_view_id(context, sent.message_id)
     return sent.message_id
 
 
 async def _send_topic_photos(
-    bot: Bot, chat_id: int, topic: str, context: ContextTypes.DEFAULT_TYPE
+    bot: Bot,
+    chat_id: int,
+    topic: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    track: bool = True,
 ) -> list[int]:
     """Доп.фото рубрики — не баннеры. Одно фото отдельно, много — пачками по 10."""
     file_ids = topic_photo_ids(context, topic)
@@ -679,6 +755,8 @@ async def _send_topic_photos(
     try:
         if len(file_ids) == 1:
             sent = await bot.send_photo(chat_id=chat_id, photo=file_ids[0])
+            if track:
+                _track_view_id(context, sent.message_id)
             return [sent.message_id]
         for chunk in db.chunk_ids(file_ids, 10):
             if len(chunk) == 1:
@@ -692,6 +770,9 @@ async def _send_topic_photos(
                 sent_ids.extend(message.message_id for message in messages)
     except TelegramError:
         logger.exception("Не удалось отправить фото рубрики %s", topic)
+    if track:
+        for message_id in sent_ids:
+            _track_view_id(context, message_id)
     return sent_ids
 
 
@@ -703,19 +784,20 @@ async def _send_topic(
     context: ContextTypes.DEFAULT_TYPE,
     include_remaining_menu: bool = True,
     track_view: bool = True,
+    extra_delete_ids: list[int] | None = None,
 ) -> None:
     """Сначала баннер темы, потом её текст и фото, потом остальные карточки меню."""
     if track_view:
-        await _delete_menu_messages(bot, chat_id, context)
-
-    sent_ids: list[int] = []
-    sent_ids.append(
-        await _send_topic_banner(
-            bot=bot,
-            chat_id=chat_id,
-            key=topic,
-            context=context,
+        await _delete_menu_messages(
+            bot, chat_id, context, extra_ids=extra_delete_ids
         )
+
+    await _send_topic_banner(
+        bot=bot,
+        chat_id=chat_id,
+        key=topic,
+        context=context,
+        track=track_view,
     )
     text = await bot.send_message(
         chat_id=chat_id,
@@ -723,22 +805,21 @@ async def _send_topic(
         parse_mode=ParseMode.HTML,
         reply_markup=topic_keyboard(context, topic),
     )
-    sent_ids.append(text.message_id)
-    sent_ids.extend(await _send_topic_photos(bot, chat_id, topic, context))
+    if track_view:
+        _track_view_id(context, text.message_id)
+    await _send_topic_photos(
+        bot, chat_id, topic, context, track=track_view
+    )
 
     if include_remaining_menu:
-        sent_ids.extend(
-            await _send_menu_gallery(
-                bot=bot,
-                chat_id=chat_id,
-                context=context,
-                exclude_key=topic,
-                replace_view=False,
-            )
+        await _send_menu_gallery(
+            bot=bot,
+            chat_id=chat_id,
+            context=context,
+            exclude_key=topic,
+            replace_view=False,
+            track=track_view,
         )
-
-    if track_view:
-        context.user_data[_MENU_MESSAGE_IDS_KEY] = sent_ids
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1356,7 +1437,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "menu":
         await _send_menu_gallery(
-            bot=context.bot, chat_id=chat_id, context=context
+            bot=context.bot,
+            chat_id=chat_id,
+            context=context,
+            extra_delete_ids=[query.message.message_id],
         )
         return
 
@@ -1366,6 +1450,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id=chat_id,
             topic=data,
             context=context,
+            extra_delete_ids=[query.message.message_id],
         )
 
 

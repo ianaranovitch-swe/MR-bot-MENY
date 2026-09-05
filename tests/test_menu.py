@@ -37,6 +37,7 @@ from telegram_meny_abmrab import (  # noqa: E402
     channel_update_caption,
     redigera_menu,
     remaining_menu_items,
+    merge_message_ids,
     session_link_markup,
     topic_card_markup,
     topic_keyboard,
@@ -82,6 +83,11 @@ def test_topic_titles_and_card_captions() -> None:
     assert topic_title("🌿 Longevity Club 100+") == "Longevity Club 100+"
     assert menu_card_caption("💧 Aquatone") == "<b>Aquatone</b>"
     assert menu_card_caption("📰 Nyheter", is_new=True) == "<b>🆕 Nyheter</b>"
+
+
+def test_merge_message_ids_keeps_unique_order() -> None:
+    assert merge_message_ids([10, 11], 11, [12, 10], None) == [10, 11, 12]
+    assert merge_message_ids() == []
 
 
 def test_remaining_menu_items_skips_opened_topic() -> None:
